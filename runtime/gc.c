@@ -181,6 +181,10 @@ struct node *new_node(void *old_obj, void *young_obj, struct node *next) {
     return result;
 }
 
+/**
+ *This like java constructors
+ **/
+
 void add_to_barrier(void *old_obj, void *young_obj) {
     struct node **p;
     struct node *node;
@@ -228,31 +232,61 @@ static inline unsigned long get_obj_size(struct __tiger_obj_header *header) {
     return result;
 }
 
-typedef void (*travse_root_handler)(struct __tiger_obj_header **root);
-typedef void (*travse_root_callback)(void);
+typedef void (*traverse_root_handler)(struct __tiger_obj_header **root);
+typedef void (*traverse_root_callback)(void);
+
+void travse_root_handler(struct __tiger_obj_header **root) {
+    if(!*root)
+        return;
+    struct __tiger_obj_header *header = *root;
+   
+    if (in_old_gen(header) || forward(&header))
+        return;
+    copy_obj(&header);
+    root = &header;
+    // FIXME change *root is finished
+}
+void travse_root_callback() {
+    struct __tiger_obj_heap *header = (struct __tiger_obj_heap)young_gen_heap.to_scaned;
+    while (young_gen_heap.to_scaned != young_gen_heap.to_free) {
+        if (header->__arguments_gc_map != NULL) {
+            char *p =header->__arguments_gc_map;
+            int index = 0;
+            write_log("debug: traversing arguments, __argument_gc_map is '%s'", header->_arguments_gc_map);
+            for (; *p != '\0'; p++, index++) {
+                if (*p == '1') {
+                    write_log("debug: using GET_ARG_ADDRESS of index %d", index);
+                    travse_root_handler((struct __tiger_obj_header **)(__arguments_base_address + index*sizeof(void *)));
+                }
+            }
+        }
+        young_gen_heap.to_scaned += get_obj_size(header);
+    }
+}
 
 /* *
- * Because both minor collect and major collect need to travse the root,
+ * Because both minor collect and major collect need to traverse the root,
  * so we use this hight-level function to encapsulate this functionality,
  * although this function only works when handler and callback have side
  * effect. We may not need the callback in major collect, but the minor
- * collect may need it, because minor collect will use BFS to travse root
- * (why? because this will makes object that referenced by the same object
+ * collect may need it, because minor collect will use BFS to traverse root
+ * (why? because this will make object that referenced by the same object
  * close to each other, this is more cache friendly). So minor collect will
- * register some function in callback and travse_root will call this
+ * register some function in callback and traverse_root will call this
  * callback whenever it had fed all the reference of same object to the
  * handler.
  * handler will never be NULL, but callback may be NULL.
  * NOTE: The address we feed to handler may have content NULL.
  * */
-void travse_root(travse_root_handler handler, travse_root_callback callback) {
+
+void traverse_root(traverse_root_handler handler, traervse_root_callback callback) {
     struct gc_frame_header *stack_top = gc_frame_prev;
     for (; stack_top;
             stack_top = stack_top->__prev) {
         if (stack_top->__arguments_gc_map != NULL) {
             char *p = stack_top->__arguments_gc_map;
             int index = 0;
-            write_log("debug: travsing arguments, __arguments_gc_map is '%s'", stack_top->__arguments_gc_map);
+            write_log("debug: traversing arguments, __arguments_gc_map is '%s'", stack_top->__arguments_gc_map);
             for (; *p != '\0'; p++, index++) {
                 if (*p == '1') {
                     write_log("debug: using GET_STACK_ARG_ADDRESS of index %d", index);
@@ -263,7 +297,7 @@ void travse_root(travse_root_handler handler, travse_root_callback callback) {
         if (callback)
             callback();
         if (stack_top->__locals_gc_number != 0) {
-            write_log("debug: travsing local, __locals_gc_number is %d", stack_top->__locals_gc_number);
+            write_log("debug: traversing local, __locals_gc_number is %d", stack_top->__locals_gc_number);
             char *base = (char *)stack_top + sizeof(struct gc_frame_header);
             unsigned long index = 0;
             for (; index < stack_top->__locals_gc_number;
@@ -381,9 +415,9 @@ void move_obj_in_old_gen() {
     old_gen_heap.free = dest;
 }
 
-typedef void (*travse_barrier_handler)(struct node *root);
+typedef void (*traverse_barrier_handler)(struct node *root);
 
-void travse_barrier(travse_barrier_handler handler, int remove_unmarked_node) {
+void traverse_barrier(traverse_barrier_handler handler, int remove_unmarked_node) {
     struct node **p;
     struct node *current;
     struct node *prev = NULL;
@@ -442,10 +476,10 @@ int major_collect() {
         gettimeofday(&start, NULL);
 
         //do major collect
-        travse_root(mark_obj, NULL);
+        traverse_root(mark_obj, NULL);
         update_forwarding_in_old_gen();
-        travse_root(unmark_and_fix_pointer, NULL);
-        travse_barrier(fix_old_pointer_in_barrier, 1);
+        traverse_root(unmark_and_fix_pointer, NULL);
+        traverse_barrier(fix_old_pointer_in_barrier, 1);
         move_obj_in_old_gen();
 
         unsigned long used, rounded_used;
@@ -541,6 +575,7 @@ struct __tiger_obj_header *alloc_obj_in_old_gen_heap(void *vtable, int size) {
 
     result->__u.vptr = vtable;
     old_gen_heap.free = (char *)old_gen_heap.free + size;
+    // FIXME add scan
 
     write_log("debug: allocated 0x%lx obj of %d bytes directly in old gen", (unsigned long)result, size);
     return result;
@@ -557,9 +592,98 @@ struct __tiger_obj_header *alloc_array_in_old_gen_heap(int length) {
     result->__u.length = length;
     SET_ARRAY_TYPE(result);
     old_gen_heap.free = (char *)old_gen_heap.free + size;
+    // FIXME add scan
 
     write_log("debug: allocated 0x%lx array of %d bytes directly in old gen", (unsigned long)result, size);
     return result;
+}
+
+
+int forward(struct __tiger_obj_header **root) {
+    struct __tiger_obj_header *header = *root;
+    if (header->__forwarding >= young_gen_heap.to &&
+            header->forwarding <= young_gen_heap.to_free)
+        return 1;
+    copy_obj(&header);
+    return 0;
+}
+
+
+void copy_obj(struct __tiger_obj_header **root) {
+    if (!*root)
+        return;
+    struct __tiger_obj_header *header == *root;
+
+    //here maybe hava a problem of type
+    
+    unsigned long size = get_obj_size(header);
+    if (header->times == PROMOTE_THRESHOLD) {
+        promote(header, size); 
+    } else {
+        if (young_gen_heap.to_free+size < young_gen_heap.to+young_gen_heap.size) {
+            memcyp(young_gen_heap.to_free, header, (size_t)size);
+            inc_times((struct __tiger_obj_header)young_gen_heap.to_free);
+            header->forwording = young_gen_header.to_free;
+            root = &young_gen_heap.to_free;
+            young_gen_heap.to_free += size;
+
+            //header->times++;//FIXME incre_time in to_region
+        } else {
+            promote(header, size);
+        }
+    }
+}
+
+
+void minor_collect() {
+    struct timeval start, end;
+    gettimeofday(&start, NULL);
+    traverse_root(travse_root_handler, travse_root_callback);
+    traverse_barrier(travse_root_handler, 0);
+}
+
+struct __tiger_obj_header *Tiger_new_array(int length) {
+    int times = 0;
+    int size = length * sizeof(int) + sizeof(struct __tiger_obj_header);
+    for (; times < 2; times++) {
+        if (young_gen_heap.from_free + size > young_gen_heap.from + young_gen_heap.size) {
+            minor_collect();
+            continue;
+        } else {
+            struct __tiger_gen_heap *result;
+            result = (struct __tiger_obj_header *)young_gen_heap.from_free;
+            young_gen_heap.from_free += size;
+            memset(result, 0 size);
+            result->__u.length = length;
+            //times
+            result->times = 0;
+            write_log("debug: allocated Ox%lx array of %d bytes", (unsigned long)result, size);
+            return result;
+        }
+    }
+    promote();
+}
+
+
+struct __tiger_obj_header *Tiger_new(void *vtable, int size) {
+    int times = 0;
+    for (; times < 2; times++) {
+        if (young_gen_heap.from_free + size > young_gen_heap.from + young_gen_heap.size) {
+            minor_collect();
+            continue;
+        } else {
+            strcut __tiger_obj_header *result;
+            result = (struct __tiger_obj_header *)young_gen_heap.from_free;
+            young_gen_heap.from_free += size;
+            memset(result, 0, size);
+            result->__u.vptr = vtable;
+            //times
+            result->times = 0;
+            write_log("debug: allocated Ox%lx obj of %d bytes", (unsigned long)result, size);
+            return result;
+        }
+    }
+    promote();
 }
 
 // following is unmodified
