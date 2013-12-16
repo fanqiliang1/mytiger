@@ -232,20 +232,52 @@ static inline unsigned long get_obj_size(struct __tiger_obj_header *header) {
     return result;
 }
 
-typedef void (*traverse_root_handler)(struct __tiger_obj_header **root);
-typedef void (*traverse_root_callback)(void);
+
+void prepare_free_memory(unsigned long size);
+void *promote(void *addr, unsigned long size);
+
+int is_forwarded(struct __tiger_obj_header **root) {
+    struct __tiger_obj_header *header = *root;
+    if (header->__forwarding >= young_gen_heap.to &&
+            header->forwarding <= young_gen_heap.to_free)
+        return 1;
+    else
+        return 0;
+}
+
+void copy_obj(struct __tiger_obj_header **root) {
+    if (!*root)
+        return;
+    struct __tiger_obj_header *header = *root;
+    //here maybe hava a problem of type
+    unsigned long size = get_obj_size(header);
+    if (header->times == PROMOTE_THRESHOLD) {
+        promote(header, size); 
+    } else {
+        if (young_gen_heap.to_free+size < young_gen_heap.to+young_gen_heap.size) {
+            memcyp(young_gen_heap.to_free, header, (size_t)size);
+            inc_times((struct __tiger_obj_header)young_gen_heap.to_free);
+            header->forwording = young_gen_header.to_free;
+            root = &young_gen_heap.to_free;
+            young_gen_heap.to_free += size;
+
+            //header->times++;//FIXME incre_time in to_region
+        } else {
+            promote(header, size);
+        }
+    }
+}
 
 void travse_root_handler(struct __tiger_obj_header **root) {
     if(!*root)
         return;
-    struct __tiger_obj_header *header = *root;
    
-    if (in_old_gen(header) || forward(&header))
+    if (in_old_gen(*root) || is_forwarded(root))
         return;
-    copy_obj(&header);
-    root = &header;
+    copy_obj(root);
     // FIXME change *root is finished
 }
+
 void travse_root_callback() {
     struct __tiger_obj_heap *header = (struct __tiger_obj_heap)young_gen_heap.to_scaned;
     while (young_gen_heap.to_scaned != young_gen_heap.to_free) {
@@ -263,6 +295,9 @@ void travse_root_callback() {
         young_gen_heap.to_scaned += get_obj_size(header);
     }
 }
+
+typedef void (*traverse_root_handler)(struct __tiger_obj_header **root);
+typedef void (*traverse_root_callback)(void);
 
 /* *
  * Because both minor collect and major collect need to traverse the root,
@@ -599,47 +634,32 @@ struct __tiger_obj_header *alloc_array_in_old_gen_heap(int length) {
 }
 
 
-int forward(struct __tiger_obj_header **root) {
-    struct __tiger_obj_header *header = *root;
-    if (header->__forwarding >= young_gen_heap.to &&
-            header->forwarding <= young_gen_heap.to_free)
-        return 1;
-    copy_obj(&header);
-    return 0;
-}
-
-
-void copy_obj(struct __tiger_obj_header **root) {
-    if (!*root)
-        return;
-    struct __tiger_obj_header *header == *root;
-
-    //here maybe hava a problem of type
-    
-    unsigned long size = get_obj_size(header);
-    if (header->times == PROMOTE_THRESHOLD) {
-        promote(header, size); 
-    } else {
-        if (young_gen_heap.to_free+size < young_gen_heap.to+young_gen_heap.size) {
-            memcyp(young_gen_heap.to_free, header, (size_t)size);
-            inc_times((struct __tiger_obj_header)young_gen_heap.to_free);
-            header->forwording = young_gen_header.to_free;
-            root = &young_gen_heap.to_free;
-            young_gen_heap.to_free += size;
-
-            //header->times++;//FIXME incre_time in to_region
-        } else {
-            promote(header, size);
-        }
-    }
-}
 
 
 void minor_collect() {
+    static int round = 0;
     struct timeval start, end;
+    long size_before_gc;
+    size_before_gc = young_gen_heap.to_free - young_gen_heap.to;
     gettimeofday(&start, NULL);
     traverse_root(travse_root_handler, travse_root_callback);
     traverse_barrier(travse_root_handler, 0);
+    
+    void *tmp;
+    tmp = young_gen_heap.to
+    young_gen_heap.to = young_gen_heap.from;
+    young_gen_heap.from = tmp;
+
+    young_gen_heap.from_free = young_gen_heap.to_free;
+    young_gen_heap.to_free = tmp;
+    young_gen_heap.to_scaned =tmp;
+
+    gettimeofday(&end, NULL);
+    long size_after_gc = young_gen_heap.from_free - young_gen_heap.from;
+    write_log("info: %d round of GC: %.5fs, collected %ld bytes",
+                    round,
+                    get_time_diff_sec(end, start),
+                    size_before_gc - size_after_gc);
 }
 
 struct __tiger_obj_header *Tiger_new_array(int length) {
@@ -661,7 +681,7 @@ struct __tiger_obj_header *Tiger_new_array(int length) {
             return result;
         }
     }
-    promote();
+    return allc_array_old_gen_heap(length);
 }
 
 
@@ -683,7 +703,7 @@ struct __tiger_obj_header *Tiger_new(void *vtable, int size) {
             return result;
         }
     }
-    promote();
+    return alloc_obj_in_old_gen_heap(vtable, size);
 }
 
 // following is unmodified
